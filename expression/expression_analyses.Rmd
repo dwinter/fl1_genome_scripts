@@ -1,0 +1,119 @@
+
+---
+title: Statistical Analysis of Gene Expression Data
+author: David Winter
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+    pdf_document:
+        latex_engine: xelatex
+monofont : FreeMono
+mainfont: "Linux Libertine O"
+---
+
+##Introduction
+
+This document describes and provides the statistical analyses used to examine
+gene expression data from _Epichloë festucae_ strain FL1. The analyses are
+based on a data set that contains data derrrived from a number of analyses
+
+```{r}
+expr_data <- read.csv("expression_summary.csv", stringsAsFactors=FALSE)
+knitr::kable(expr_data[1:5, c("gene","log2FoldChange", "Fl1_specific", "dAT", "tad")])
+```
+
+## Do TADs predict gene expression changes?
+
+We first fit a linear model of change in gene expression is predicted by
+membership of a TAD.  To do this tidyly we produce a function that parsed model
+ouputs.
+
+```{r}
+
+make_mod_tab <- function(mod, fdr=0.1){
+    mod_table <- as.data.frame(coef(summary(mod))[-1,])
+    mod_table$chrom <- sapply(strsplit(rownames(mod_table), "_"), "[[", 2)
+    mod_table$bin <- sapply(strsplit(rownames(mod_table), "_"), "[[", 3)
+    mod_table <- mod_table[order(mod_table$chrom, as.numeric(mod_table$bin)),]
+    names(mod_table) <- c("est.", "std.error", "t-val", "p-val", "chrom", "tad")
+    mod_table$padj <-  p.adjust(mod_table$`p-val`, method="fdr")
+    mod_table$sig <- mod_table$padj <= fdr
+    mod_table
+}
+```
+
+Then fit both the full model (with TAD predicting change in gene expressoin) and
+a null model. These models are compared by AIC.
+
+```{r}
+tad_data <- expr_data[!is.na(expr_data$tad),]
+mod <- lm(log2FoldChange ~ tad, data=tad_data)
+null <- lm(log2FoldChange ~ 1, data=tad_data)
+AIC(mod, null)
+
+```
+
+As the model with TADs fits subtantially better than the mdoel without them, we
+will plot the estimated effect-size for each TAD (Figure 10a in the manuscript).
+
+```{r}
+library(ggplot2)
+library(ggrepel)
+
+res <- make_mod_tab(mod)
+res$order <- 1:nrow(res)
+p <- ggplot(res, aes(x=order, y=est., ymax=est. + 2 * std.error, ymin=est. - 2 * std.error, colour=chrom))
+p + geom_hline(yintercept=0) + geom_errorbar(width=0) + 
+    geom_point(size=2) + 
+    scale_colour_brewer(palette="Dark2") +
+    scale_y_continuous("log2 Fold change", limits=c(-6,6)) +
+    geom_label_repel(data=res[ res$sig,], aes(x=order, y=est., label=paste(chrom, tad, sep="_")))
+
+```
+
+## Are secondary metabolite and other important genes close to AT rich regions?
+
+We then consider the possibility that AT-rich regions are associated with
+particular classes of genes that may be important in regulating the symbiosis
+between _Epichloe_ and its host.
+
+Because we do not expect a linear relatinship between the distance between an
+AT-rich region and any of these gene classes we first distcritize the "distance
+from AT" data into give non-overlapping bins.
+
+```{r}
+at_classes <- c(-Inf, 0, 300, 1000, 5000, Inf)
+expr_data$dAT_cut <- cut(expr_data$dAT, at_classes, 
+                         ordered_result=TRUE, 
+                         labels = c("In", "[0,300bp)", "[300bp,1.kbp)","[1kbp,5kbp)", ">=5kbp")
+)
+
+```
+
+We tried two different approaches to testing for association between AT-rich
+regions and "ordered probit regression", which would accomidate the orderd
+nature of distance-classes and logistic regression in which proximity to an
+AT-rich region was treated as binary variable (with values >= 5kb being
+considred distant and < 5kb close). In practice, both analyses produced similar
+results and the logistic regression is the easiest to interpret biologically, so
+we only report this result.
+
+
+```{r}
+d_mod  <- MASS::polr(dAT_cut ~ Fl1_specific + upreg + log(dTelo) + secreted + metab, data=expr_data, Hess=TRUE, method="probit")
+p_mod <- glm(dAT < 5000 ~ Fl1_specific + upreg + (dTelo < 5e4) + secreted + metab, data=expr_data, family="binomial")
+summary(p_mod)
+```
+
+We nevertheless visualise the effects across all distance bins.
+
+```{r}
+ggplot(expr_data, aes(dAT_cut, fill=Fl1_specific)) + geom_bar(position="fill", colour="black") + scale_fill_brewer()
+
+predictors <- aggregate(cbind(Fl1_specific, metab, secreted, upreg) ~ dAT_cut, data=expr_data, FUN=sum)
+molten <- melt(predictors)
+molten$n <- table(expr_data$dAT_cut)
+ggplot(molten, aes(dAT_cut, value/n, group=variable, colour=variable, label=variable)) + 
+    geom_point(size=2) + geom_line(size=1) + 
+    scale_colour_brewer(palette="Dark2")
+
+```
